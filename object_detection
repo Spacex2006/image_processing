@@ -1,0 +1,242 @@
+from pathlib import Path
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import filedialog
+import queue
+
+def get_file_path():
+    root = tk.Tk()
+    root.withdraw() 
+    
+    file_types = [
+        ("JPEG Images", "*.jpg"),
+        ("PNG Images", "*.png"),
+        ("All Files", "*.*")
+    ]
+    
+    selected_path = filedialog.askopenfilename(
+        title="Select an Image for Processing",
+        initialdir=Path.home() / "Downloads",
+        filetypes=file_types
+    )
+    
+    return Path(selected_path) if selected_path else None
+
+image_path = get_file_path()
+
+print("\n--- Image Processing Initialization ---")
+scale_factor = int(input("Enter downsampling ratio (e.g., 1 for full resolution, 8 for fast preview): "))
+
+try:
+    img = Image.open(image_path)
+    sandbox_array = np.array(img)[::scale_factor, ::scale_factor]
+    print(f"Working Resolution: {sandbox_array.shape[1]}x{sandbox_array.shape[0]}")
+except FileNotFoundError:
+    print("[Error] Image not found.")
+    exit()
+
+# Setup interactive live plotting
+plt.ion()
+fig, ax = plt.subplots()
+im = ax.imshow(sandbox_array)
+plt.axis('off')
+
+height, width, channels = sandbox_array.shape
+
+# FIXED: Initialize 'arr' as a 2D intensity grid
+arr = np.zeros((height, width), dtype=int)
+
+# Pass 1: Convert image to grayscale for intensity mapping
+for row in range(height):
+    for col in range(width):
+        x = sandbox_array[row, col].astype(int)
+        avg = (x[0] + x[1] + x[2]) // 3  
+        sandbox_array[row, col] = [avg, avg, avg]
+        arr[row, col] = avg  # FIXED: Save the brightness value into 'arr'!
+        
+    if row % 4 == 0:
+        im.set_data(sandbox_array)
+        plt.draw()
+        plt.pause(0.001)
+
+im.set_data(sandbox_array)
+plt.draw()
+plt.pause(0.001)
+
+# Pass 2: Vector Engine
+kms = np.zeros((height, width, 2))
+magn = np.zeros((height, width))
+magnitude=[]
+for row in range(height):
+    for col in range(width):
+        vector = np.array([0.0, 0.0])
+        curr_brightness = int(arr[row, col]) 
+        
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue
+                
+                n_row = row + dr
+                n_col = col + dc
+                
+                if 0 <= n_row < height and 0 <= n_col < width:
+                    neighbor_brightness = int(arr[n_row, n_col])
+                    diff = neighbor_brightness - curr_brightness
+                    mag = np.sqrt(dr*dr + dc*dc)
+                    
+                    vector[0] += diff * (dr / mag) # Y component
+                    vector[1] += diff * (dc / mag) # X component
+                    
+        kms[row, col] = vector
+        magn[row,col]=np.sqrt(vector[0]**2+vector[1]**2)
+        magnitude.append((magn[row,col],row,col))
+magnitude.sort(key=lambda item: item[0], reverse=True)
+
+# --- TRACKING SETUP ---
+global_mean_magnitude = np.mean(magn) 
+active_threshold = global_mean_magnitude * 3  # Strict entry requirement
+low_threshold = global_mean_magnitude * 1   # Lenient continuation requirement
+print(f"Global Average Magnitude: {global_mean_magnitude:.2f}")
+print(f"Dynamic Cutoff Threshold Set To: {active_threshold:.2f}")
+
+print("Starting Line Crawl Exploration...")
+print("\n=== Launching Line Crawl Exploration ===")
+print(f"TARGET GLOBAL THRESHOLD: {active_threshold:.2f}\n")
+
+visited = np.zeros((height, width), dtype=bool)
+red = [255, 0, 0]
+
+# CHIP CHANGE: Flat list to store the final length of every single drawn segment
+segment_lengths = []
+
+for seed_mag, r_seed, c_seed in magnitude:
+    if seed_mag < active_threshold:
+        print(f"--> Halting global search: Next suggestion magnitude ({seed_mag:.2f}) drops below Target Threshold ({active_threshold:.2f})")
+        break
+        
+    if visited[r_seed, c_seed]:
+        continue
+        
+    print(f"\n[NEW SEED FOUND] Position: ({r_seed}, {c_seed}) | Seed Magnitude: {seed_mag:.2f} (active Target: {active_threshold:.2f}) (low Target: {low_threshold:.2f}")
+    print("Tracing path... ", end="", flush=True)
+    
+    q = queue.Queue()
+    forbidden = queue.Queue()
+    q.put((r_seed, c_seed))
+    pixels_traced_in_segment = 0
+    
+    while not q.empty():
+        r, c = q.get()
+        
+        if visited[r, c]:
+            continue
+            
+        visited[r, c] = True
+        sandbox_array[r, c] = red
+        forbidden.put((r,c))
+        pixels_traced_in_segment += 1
+        
+        curr_v = kms[r, c]
+        v_y = curr_v[0]
+        v_x = curr_v[1]
+        
+        if v_y == 0 and v_x == 0:
+            continue
+            
+        p_y = -v_x
+        p_x = v_y
+        
+        if abs(p_x) > 2 * abs(p_y):
+            dr, dc = 0, 1 if p_x > 0 else -1
+        elif abs(p_y) > 2 * abs(p_x):
+            dr, dc = 1 if p_y > 0 else -1, 0
+        else:
+            dr = 1 if p_y > 0 else -1
+            dc = 1 if p_x > 0 else -1
+            
+        n1_r, n1_c = r + dr, c + dc
+        n2_r, n2_c = r - dr, c - dc
+        
+        mag1 = magn[n1_r, n1_c] if (0 <= n1_r < height and 0 <= n1_c < width) else -1
+        mag2 = magn[n2_r, n2_c] if (0 <= n2_r < height and 0 <= n2_c < width) else -1
+        
+        if mag1 >= low_threshold and 0 <= n1_r < height and 0 <= n1_c < width and not visited[n1_r, n1_c]:
+            q.put((n1_r, n1_c))
+        if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not visited[n2_r, n2_c]:
+            q.put((n2_r, n2_c))
+    for n_r, n_c in forbidden
+        for repel_r in [-1, 0, 1]:
+            for repel_c in [-1, 0, 1]:
+                n_r, n_c = r + repel_r, c + repel_c
+                if 0 <= n_r < height and 0 <= n_c < width:
+                    visited[n_r, n_c] = True
+                
+    print(f"Done. Drew a segment of {pixels_traced_in_segment} connected pixels.")
+    
+    # CHIP CHANGE: Only record segments that actually grew
+    if pixels_traced_in_segment > 0:
+        segment_lengths.append(pixels_traced_in_segment)
+
+    # Optional Visual Throttle: Only update screen every few segments to save speed
+    im.set_data(sandbox_array)
+    plt.draw()
+    plt.pause(0.001)
+
+print("\n=== Processing Complete ===")
+im.set_data(sandbox_array)
+plt.draw()
+
+# =====================================================================
+# NEW STATISTICAL ANALYSIS & DENSITY PLOTTING ENGINE
+# =====================================================================
+if len(segment_lengths) > 0:
+    lengths_arr = np.array(segment_lengths)
+    
+    # Calculate key statistical boundaries
+    avg_len = np.mean(lengths_arr)
+    std_len = np.std(lengths_arr)
+    max_len = np.max(lengths_arr)
+    total_segments = len(lengths_arr)
+    
+    print("\n" + "="*40)
+    print("        SEGMENT LENGTH PROFILE")
+    print("="*40)
+    print(f"Total Unique Segments Generated : {total_segments}")
+    print(f"Average Segment Length          : {avg_len:.2f} pixels")
+    print(f"Standard Deviation (σ)          : {std_len:.2f} pixels")
+    print(f"Longest Unbroken Path Segment   : {max_len} pixels")
+    print("="*40)
+    
+    # Generate the Density Window Frame
+    plt.ioff() # Turn off interactive mode so this graph sits static
+    fig2, ax2 = plt.subplots(figsize=(8, 5))
+    
+    # Plot a normalized density histogram (density=True creates the probability density profile)
+    # Using 'log=True' can be useful if you have millions of 1-pixel noise segments hiding the big paths
+    count, bins, patches = ax2.hist(lengths_arr, bins=max(10, min(50, max_len)), 
+                                    density=True, alpha=0.6, color='crimson', edgecolor='black', label='Segment Data')
+    
+    # Calculate a smooth continuous line over the distribution
+    from scipy.stats import gaussian_kde
+    if total_segments > 1 and std_len > 0:
+        kde = gaussian_kde(lengths_arr)
+        x_axis = np.linspace(0, max_len, 500)
+        ax2.plot(x_axis, kde(x_axis), color='darkred', linewidth=2, label='Density Smoothing (KDE)')
+    
+    # Add clear target indicators onto the layout
+    ax2.axvline(avg_len, color='blue', linestyle='dashed', linewidth=2, label=f'Mean ({avg_len:.1f})')
+    
+    ax2.set_title("Segment Length Probability Density Graph", fontsize=12, fontweight='bold')
+    ax2.set_xlabel("Segment Length (Number of Pixels Plotted)", fontsize=10)
+    ax2.set_ylabel("Probability Density", fontsize=10)
+    ax2.grid(True, linestyle=':', alpha=0.6)
+    ax2.legend()
+    
+    plt.show()
+else:
+    print("\n[Warning] No segments were drawn. Adjust your threshold parameters.")
+    plt.ioff()
+    plt.show()
