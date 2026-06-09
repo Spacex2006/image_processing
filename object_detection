@@ -45,34 +45,26 @@ plt.axis('off')
 
 height, width, channels = sandbox_array.shape
 
-# FIXED: Initialize 'arr' as a 2D intensity grid
-arr = np.zeros((height, width), dtype=int)
+arr = np.zeros((height, width, 3), dtype=int)
 
-# Pass 1: Convert image to grayscale for intensity mapping
+# Pass 1: Load RGB Data (No more grayscale averaging!)
 for row in range(height):
     for col in range(width):
-        x = sandbox_array[row, col].astype(int)
-        avg = (x[0] + x[1] + x[2]) // 3  
-        sandbox_array[row, col] = [avg, avg, avg]
-        arr[row, col] = avg  # FIXED: Save the brightness value into 'arr'!
-        
-    if row % 4 == 0:
-        im.set_data(sandbox_array)
-        plt.draw()
-        plt.pause(0.001)
+        arr[row, col] = sandbox_array[row, col].astype(int)
 
-im.set_data(sandbox_array)
-plt.draw()
-plt.pause(0.001)
-
-# Pass 2: Vector Engine
+# Pass 2: RGB Vector Engine
 kms = np.zeros((height, width, 2))
 magn = np.zeros((height, width))
-magnitude=[]
+magnitude = []
+
 for row in range(height):
     for col in range(width):
-        vector = np.array([0.0, 0.0])
-        curr_brightness = int(arr[row, col]) 
+        # Three separate vectors for the three color channels
+        vec_r = np.array([0.0, 0.0])
+        vec_g = np.array([0.0, 0.0])
+        vec_b = np.array([0.0, 0.0])
+        
+        curr_R, curr_G, curr_B = arr[row, col] 
         
         for dr in [-1, 0, 1]:
             for dc in [-1, 0, 1]:
@@ -83,16 +75,39 @@ for row in range(height):
                 n_col = col + dc
                 
                 if 0 <= n_row < height and 0 <= n_col < width:
-                    neighbor_brightness = int(arr[n_row, n_col])
-                    diff = neighbor_brightness - curr_brightness
-                    mag = np.sqrt(dr*dr + dc*dc)
+                    nR, nG, nB = arr[n_row, n_col]
                     
-                    vector[0] += diff * (dr / mag) # Y component
-                    vector[1] += diff * (dc / mag) # X component
+                    mag_dist = np.sqrt(dr*dr + dc*dc)
                     
-        kms[row, col] = vector
-        magn[row,col]=np.sqrt(vector[0]**2+vector[1]**2)
-        magnitude.append((magn[row,col],row,col))
+                    # Calculate differences for all 3 channels
+                    diff_R = nR - curr_R
+                    diff_G = nG - curr_G
+                    diff_B = nB - curr_B
+                    
+                    # Push each color vector in the orthogonal direction
+                    vec_r[0] += diff_R * (dr / mag_dist) # Y component
+                    vec_r[1] += diff_R * (dc / mag_dist) # X component
+                    
+                    vec_g[0] += diff_G * (dr / mag_dist)
+                    vec_g[1] += diff_G * (dc / mag_dist)
+                    
+                    vec_b[0] += diff_B * (dr / mag_dist)
+                    vec_b[1] += diff_B * (dc / mag_dist)
+                    
+        # Combine the 3 channel vectors into one master directional vector
+        kms[row, col] = (vec_r + vec_g + vec_b) / 3
+        
+        # Calculate the total magnitude by summing the squares of all three channels
+        # This ensures that a massive contrast in ANY single color spikes the magnitude
+        mag_R = vec_r[0]**2 + vec_r[1]**2
+        mag_G = vec_g[0]**2 + vec_g[1]**2
+        mag_B = vec_b[0]**2 + vec_b[1]**2
+        
+        total_mag = np.sqrt(mag_R + mag_G + mag_B)
+        
+        magn[row, col] = total_mag
+        magnitude.append((total_mag, row, col))
+        
 magnitude.sort(key=lambda item: item[0], reverse=True)
 
 # --- TRACKING SETUP ---
