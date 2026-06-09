@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from PIL import Image
 import numpy as np
@@ -29,6 +30,11 @@ image_path = get_file_path()
 print("\n--- Image Processing Initialization ---")
 scale_factor = int(input("Enter downsampling ratio (e.g., 1 for full resolution, 8 for fast preview): "))
 
+# --- START OVERALL TIMER ---
+total_start_time = time.time()
+
+# 1. TIMING: Load & Resize
+t0 = time.time()
 try:
     img = Image.open(image_path)
     sandbox_array = np.array(img)[::scale_factor, ::scale_factor]
@@ -36,6 +42,7 @@ try:
 except FileNotFoundError:
     print("[Error] Image not found.")
     exit()
+time_load = time.time() - t0
 
 # Setup interactive live plotting
 plt.ion()
@@ -52,7 +59,10 @@ for row in range(height):
     for col in range(width):
         arr[row, col] = sandbox_array[row, col].astype(int)
 
-# Pass 2: RGB Vector Engine
+# 2. TIMING: RGB Vector Engine
+t1 = time.time()
+print("Running RGB Vector Engine... ", end="", flush=True)
+
 kms = np.zeros((height, width, 2))
 magn = np.zeros((height, width))
 magnitude = []
@@ -107,8 +117,14 @@ for row in range(height):
         
         magn[row, col] = total_mag
         magnitude.append((total_mag, row, col))
-        
+
+time_vector_engine = time.time() - t1
+print(f"Done ({time_vector_engine:.2f}s)")
+
+# 3. TIMING: Sorting
+t2 = time.time()
 magnitude.sort(key=lambda item: item[0], reverse=True)
+time_sort = time.time() - t2
 
 # --- TRACKING SETUP ---
 global_mean_magnitude = np.mean(magn) 
@@ -116,6 +132,9 @@ active_threshold = global_mean_magnitude * 3  # Strict entry requirement
 low_threshold = global_mean_magnitude * 1   # Lenient continuation requirement
 print(f"Global Average Magnitude: {global_mean_magnitude:.2f}")
 print(f"Dynamic Cutoff Threshold Set To: {active_threshold:.2f}")
+
+# Create a pitch-black canvas of the exact same size
+edge_canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
 print("Starting Line Crawl Exploration...")
 print("\n=== Launching Line Crawl Exploration ===")
@@ -125,8 +144,10 @@ visited = np.zeros((height, width), dtype=bool)
 temp=np.zeros((height, width), dtype=bool)
 red = [255, 0, 0]
 
-# CHIP CHANGE: Flat list to store the final length of every single drawn segment
 segment_lengths = []
+
+# 4. TIMING: The Crawl
+t3 = time.time()
 
 for seed_mag, r_seed, c_seed in magnitude:
     if seed_mag < active_threshold:
@@ -181,6 +202,7 @@ for seed_mag, r_seed, c_seed in magnitude:
             q.put((n1_r, n1_c))
         if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not temp[n2_r, n2_c] and not visited[n2_r,n2_c]:
             q.put((n2_r, n2_c))
+            
     if pixels_traced_in_segment>100:
         while not forbidden.empty():
             r,c = forbidden.get()
@@ -191,6 +213,7 @@ for seed_mag, r_seed, c_seed in magnitude:
                         visited[n_r, n_c] = True
                         if repel_r==0 and repel_c==0:
                             sandbox_array[r, c] = red
+                            edge_canvas[r, c] = red
                 
     print(f"Done. Drew a segment of {pixels_traced_in_segment} connected pixels.")
     
@@ -198,14 +221,36 @@ for seed_mag, r_seed, c_seed in magnitude:
     if pixels_traced_in_segment > 100:
         segment_lengths.append(pixels_traced_in_segment)
 
-    # Optional Visual Throttle: Only update screen every few segments to save speed
+    # Optional Visual Throttle
     im.set_data(sandbox_array)
     plt.draw()
     plt.pause(0.001)
 
-print("\n=== Processing Complete ===")
+time_crawl = time.time() - t3
+total_time = time.time() - total_start_time
+
+print("\n" + "="*40)
+print("     PERFORMANCE DIAGNOSTICS")
+print("="*40)
+print(f"Image Load & Resize : {time_load:.3f} seconds")
+print(f"RGB Vector Engine   : {time_vector_engine:.3f} seconds")
+print(f"Seed Sorting        : {time_sort:.3f} seconds")
+print(f"Edge Crawling       : {time_crawl:.3f} seconds")
+print("-" * 40)
+print(f"TOTAL EXECUTION TIME: {total_time:.3f} seconds")
+print("="*40)
+
+plt.ioff() 
+
+# --- WINDOW 1: The Overlaid Image ---
 im.set_data(sandbox_array)
-plt.draw()
+ax.set_title("Result 1: Overlaid on Original Photo")
+
+# --- WINDOW 2: The Pure Edge Map ---
+fig_edges, ax_edges = plt.subplots()
+ax_edges.imshow(edge_canvas)
+ax_edges.axis('off')
+ax_edges.set_title("Result 2: Pure Edge Map")
 
 # =====================================================================
 # NEW STATISTICAL ANALYSIS & DENSITY PLOTTING ENGINE
@@ -213,7 +258,6 @@ plt.draw()
 if len(segment_lengths) > 0:
     lengths_arr = np.array(segment_lengths)
     
-    # Calculate key statistical boundaries
     avg_len = np.mean(lengths_arr)
     std_len = np.std(lengths_arr)
     max_len = np.max(lengths_arr)
@@ -228,23 +272,17 @@ if len(segment_lengths) > 0:
     print(f"Longest Unbroken Path Segment   : {max_len} pixels")
     print("="*40)
     
-    # Generate the Density Window Frame
-    plt.ioff() # Turn off interactive mode so this graph sits static
     fig2, ax2 = plt.subplots(figsize=(8, 5))
     
-    # Plot a normalized density histogram (density=True creates the probability density profile)
-    # Using 'log=True' can be useful if you have millions of 1-pixel noise segments hiding the big paths
     count, bins, patches = ax2.hist(lengths_arr, bins=max(10, min(50, max_len)), 
                                     density=True, alpha=0.6, color='crimson', edgecolor='black', label='Segment Data')
     
-    # Calculate a smooth continuous line over the distribution
     from scipy.stats import gaussian_kde
     if total_segments > 1 and std_len > 0:
         kde = gaussian_kde(lengths_arr)
         x_axis = np.linspace(0, max_len, 500)
         ax2.plot(x_axis, kde(x_axis), color='darkred', linewidth=2, label='Density Smoothing (KDE)')
     
-    # Add clear target indicators onto the layout
     ax2.axvline(avg_len, color='blue', linestyle='dashed', linewidth=2, label=f'Mean ({avg_len:.1f})')
     
     ax2.set_title("Segment Length Probability Density Graph", fontsize=12, fontweight='bold')
