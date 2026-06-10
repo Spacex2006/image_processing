@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog
 import queue
+from scipy.stats import gaussian_kde
 
 def get_file_path():
     root = tk.Tk()
@@ -54,7 +55,7 @@ height, width, channels = sandbox_array.shape
 
 arr = np.zeros((height, width, 3), dtype=int)
 
-# Pass 1: Load RGB Data (No more grayscale averaging!)
+# Pass 1: Load RGB Data
 for row in range(height):
     for col in range(width):
         arr[row, col] = sandbox_array[row, col].astype(int)
@@ -69,7 +70,6 @@ magnitude = []
 
 for row in range(height):
     for col in range(width):
-        # Three separate vectors for the three color channels
         vec_r = np.array([0.0, 0.0])
         vec_g = np.array([0.0, 0.0])
         vec_b = np.array([0.0, 0.0])
@@ -86,17 +86,14 @@ for row in range(height):
                 
                 if 0 <= n_row < height and 0 <= n_col < width:
                     nR, nG, nB = arr[n_row, n_col]
-                    
                     mag_dist = np.sqrt(dr*dr + dc*dc)
                     
-                    # Calculate differences for all 3 channels
                     diff_R = nR - curr_R
                     diff_G = nG - curr_G
                     diff_B = nB - curr_B
                     
-                    # Push each color vector in the orthogonal direction
-                    vec_r[0] += diff_R * (dr / mag_dist) # Y component
-                    vec_r[1] += diff_R * (dc / mag_dist) # X component
+                    vec_r[0] += diff_R * (dr / mag_dist)
+                    vec_r[1] += diff_R * (dc / mag_dist)
                     
                     vec_g[0] += diff_G * (dr / mag_dist)
                     vec_g[1] += diff_G * (dc / mag_dist)
@@ -104,11 +101,8 @@ for row in range(height):
                     vec_b[0] += diff_B * (dr / mag_dist)
                     vec_b[1] += diff_B * (dc / mag_dist)
                     
-        # Combine the 3 channel vectors into one master directional vector
         kms[row, col] = (vec_r + vec_g + vec_b) / 3
         
-        # Calculate the total magnitude by summing the squares of all three channels
-        # This ensures that a massive contrast in ANY single color spikes the magnitude
         mag_R = vec_r[0]**2 + vec_r[1]**2
         mag_G = vec_g[0]**2 + vec_g[1]**2
         mag_B = vec_b[0]**2 + vec_b[1]**2
@@ -127,28 +121,37 @@ magnitude.sort(key=lambda item: item[0], reverse=True)
 time_sort = time.time() - t2
 
 # --- TRACKING SETUP ---
+flat_magnitudes = magn.flatten()
+mag_mean = np.mean(flat_magnitudes)
+mag_std = np.std(flat_magnitudes)
+mag_max = np.max(flat_magnitudes)
 global_mean_magnitude = np.mean(magn) 
-active_threshold = global_mean_magnitude * 3  # Strict entry requirement
-low_threshold = global_mean_magnitude * 1   # Lenient continuation requirement
+a = np.percentile(flat_magnitudes, 99)
+b = np.percentile(flat_magnitudes, 75)
+active_threshold = a
+low_threshold = b
 print(f"Global Average Magnitude: {global_mean_magnitude:.2f}")
 print(f"Dynamic Cutoff Threshold Set To: {active_threshold:.2f}")
+z=magnitude[0]
+maxi=z[0]
 
-# Create a pitch-black canvas of the exact same size
+# Create a Pitch-black canvas of the exact same size
 edge_canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
 print("Starting Line Crawl Exploration...")
 print("\n=== Launching Line Crawl Exploration ===")
 print(f"TARGET GLOBAL THRESHOLD: {active_threshold:.2f}\n")
-
+idk= np.zeros((height, width), dtype=bool)
 visited = np.zeros((height, width), dtype=bool)
-temp=np.zeros((height, width), dtype=bool)
-red = [255, 0, 0]
+temp = np.zeros((height, width), dtype=bool)
+red = [255, 255, 255]
 
 segment_lengths = []
 
 # 4. TIMING: The Crawl
 t3 = time.time()
-
+x=0
+y=0
 for seed_mag, r_seed, c_seed in magnitude:
     if seed_mag < active_threshold:
         print(f"--> Halting global search: Next suggestion magnitude ({seed_mag:.2f}) drops below Target Threshold ({active_threshold:.2f})")
@@ -157,6 +160,7 @@ for seed_mag, r_seed, c_seed in magnitude:
     if visited[r_seed, c_seed]:
         continue
         
+    y+=1
     print(f"\n[NEW SEED FOUND] Position: ({r_seed}, {c_seed}) | Seed Magnitude: {seed_mag:.2f} (active Target: {active_threshold:.2f}) (low Target: {low_threshold:.2f}")
     print("Tracing path... ", end="", flush=True)
     
@@ -165,9 +169,10 @@ for seed_mag, r_seed, c_seed in magnitude:
     q.put((r_seed, c_seed))
     pixels_traced_in_segment = 0
     while not q.empty():
+        x+=1
         r, c = q.get()
         
-        if visited[r, c] or temp[r,c]:
+        if idk[r, c] or temp[r,c]:
             continue
             
         temp[r,c] = True
@@ -198,12 +203,12 @@ for seed_mag, r_seed, c_seed in magnitude:
         mag1 = magn[n1_r, n1_c] if (0 <= n1_r < height and 0 <= n1_c < width) else -1
         mag2 = magn[n2_r, n2_c] if (0 <= n2_r < height and 0 <= n2_c < width) else -1
         
-        if mag1 >= low_threshold and 0 <= n1_r < height and 0 <= n1_c < width and not temp[n1_r, n1_c] and not visited[n1_r,n1_c]:
+        if mag1 >= low_threshold and 0 <= n1_r < height and 0 <= n1_c < width and not temp[n1_r, n1_c] and not idk[n1_r,n1_c]:
             q.put((n1_r, n1_c))
-        if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not temp[n2_r, n2_c] and not visited[n2_r,n2_c]:
+        if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not temp[n2_r, n2_c] and not idk[n2_r,n2_c]:
             q.put((n2_r, n2_c))
             
-    if pixels_traced_in_segment>100:
+    if pixels_traced_in_segment > 100:
         while not forbidden.empty():
             r,c = forbidden.get()
             for repel_r in range(-5,6):
@@ -212,19 +217,41 @@ for seed_mag, r_seed, c_seed in magnitude:
                     if 0 <= n_r < height and 0 <= n_c < width:
                         visited[n_r, n_c] = True
                         if repel_r==0 and repel_c==0:
-                            sandbox_array[r, c] = red
-                            edge_canvas[r, c] = red
+                            idk[n_r,n_c]=True
+                            sandbox_array[r, c] = np.array(red)*((magn[r,c]/maxi)**0.5)
+                            edge_canvas[r, c] = np.array(red)*((magn[r,c]/maxi)**0.5)
                 
     print(f"Done. Drew a segment of {pixels_traced_in_segment} connected pixels.")
-    
-    # CHIP CHANGE: Only record segments that actually grew
     if pixels_traced_in_segment > 100:
         segment_lengths.append(pixels_traced_in_segment)
 
-    # Optional Visual Throttle
     im.set_data(sandbox_array)
     plt.draw()
     plt.pause(0.001)
+# =====================================================================
+# INJECTED MODULE: VECTOR GRADIENT MAGNITUDE ANALYSIS
+# =====================================================================
+flat_magnitudes = magn.flatten()
+mag_mean = np.mean(flat_magnitudes)
+mag_std = np.std(flat_magnitudes)
+mag_max = np.max(flat_magnitudes)
+
+# Compute basic percentile markers to evaluate detail distribution
+p50 = np.percentile(flat_magnitudes, 50)
+p90 = np.percentile(flat_magnitudes, 90)
+p99 = np.percentile(flat_magnitudes, 99)
+
+print("\n" + "="*40)
+print("     RAW GRADIENT MAGNITUDE PROFILE")
+print("="*40)
+print(f"Total Array Pixels Evaluated    : {len(flat_magnitudes)}")
+print(f"Mean Vector Magnitude Force     : {mag_mean:.2f}")
+print(f"Standard Deviation (σ)          : {mag_std:.2f}")
+print(f"Peak Gradient Contrast Force    : {mag_max:.2f}")
+print(f"Median Detail Floor (50th %ile) : {p50:.2f}")
+print(f"True Boundary Filter (90th %ile): {p90:.2f}")
+print(f"High-Energy Signals  (99th %ile): {p99:.2f}")
+print("="*40 + "\n")
 
 time_crawl = time.time() - t3
 total_time = time.time() - total_start_time
@@ -242,22 +269,41 @@ print("="*40)
 
 plt.ioff() 
 
-# --- WINDOW 1: The Overlaid Image ---
+# --- WINDOW 1: Overlaid ---
 im.set_data(sandbox_array)
 ax.set_title("Result 1: Overlaid on Original Photo")
 
-# --- WINDOW 2: The Pure Edge Map ---
+# --- WINDOW 2: Edge Map ---
 fig_edges, ax_edges = plt.subplots()
 ax_edges.imshow(edge_canvas)
 ax_edges.axis('off')
 ax_edges.set_title("Result 2: Pure Edge Map")
 
-# =====================================================================
-# NEW STATISTICAL ANALYSIS & DENSITY PLOTTING ENGINE
-# =====================================================================
+# --- WINDOW 3: INJECTED GRADIENT MAGNITUDE PLOT ENGINE ---
+fig_mag, ax_mag = plt.subplots(figsize=(8, 5))
+ax_mag.hist(flat_magnitudes, bins=50, density=True, alpha=0.6, color='royalblue', edgecolor='black', label='Pixel Energies')
+
+# Generate continuous curve for gradient transitions
+if mag_std > 0:
+    # Sampling subset to speed up KDE calculation over large matrices
+    sample_size = min(20000, len(flat_magnitudes))
+    sampled_mags = np.random.choice(flat_magnitudes, sample_size, replace=False)
+    kde_mag = gaussian_kde(sampled_mags)
+    x_axis_mag = np.linspace(0, mag_max, 500)
+    ax_mag.plot(x_axis_mag, kde_mag(x_axis_mag), color='darkblue', linewidth=2, label='Energy Smoothing (KDE)')
+
+ax_mag.axvline(mag_mean, color='orange', linestyle='dashed', linewidth=2, label=f'Mean Force ({mag_mean:.1f})')
+ax_mag.axvline(active_threshold, color='red', linestyle='dashdot', linewidth=2, label=f'Active Cutoff ({active_threshold:.1f})')
+
+ax_mag.set_title("Image Gradient Force Probability Density Graph", fontsize=12, fontweight='bold')
+ax_mag.set_xlabel("Vector Acceleration Force Length (Magnitude Scale)", fontsize=10)
+ax_mag.set_ylabel("Probability Density", fontsize=10)
+ax_mag.grid(True, linestyle=':', alpha=0.6)
+ax_mag.legend()
+
+# --- WINDOW 4: PATH SEGMENT LENGTH PLOT ENGINE ---
 if len(segment_lengths) > 0:
     lengths_arr = np.array(segment_lengths)
-    
     avg_len = np.mean(lengths_arr)
     std_len = np.std(lengths_arr)
     max_len = np.max(lengths_arr)
@@ -266,6 +312,8 @@ if len(segment_lengths) > 0:
     print("\n" + "="*40)
     print("        SEGMENT LENGTH PROFILE")
     print("="*40)
+    print(f"Total New Seeds    : {y}")
+    print(f"Total Segments Evaluated : {x}")
     print(f"Total Unique Segments Generated : {total_segments}")
     print(f"Average Segment Length          : {avg_len:.2f} pixels")
     print(f"Standard Deviation (σ)          : {std_len:.2f} pixels")
@@ -273,26 +321,20 @@ if len(segment_lengths) > 0:
     print("="*40)
     
     fig2, ax2 = plt.subplots(figsize=(8, 5))
+    ax2.hist(lengths_arr, bins=max(10, min(50, max_len)), density=True, alpha=0.6, color='crimson', edgecolor='black', label='Segment Data')
     
-    count, bins, patches = ax2.hist(lengths_arr, bins=max(10, min(50, max_len)), 
-                                    density=True, alpha=0.6, color='crimson', edgecolor='black', label='Segment Data')
-    
-    from scipy.stats import gaussian_kde
     if total_segments > 1 and std_len > 0:
-        kde = gaussian_kde(lengths_arr)
-        x_axis = np.linspace(0, max_len, 500)
-        ax2.plot(x_axis, kde(x_axis), color='darkred', linewidth=2, label='Density Smoothing (KDE)')
+        kde_len = gaussian_kde(lengths_arr)
+        x_axis_len = np.linspace(0, max_len, 500)
+        ax2.plot(x_axis_len, kde_len(x_axis_len), color='darkred', linewidth=2, label='Density Smoothing (KDE)')
     
     ax2.axvline(avg_len, color='blue', linestyle='dashed', linewidth=2, label=f'Mean ({avg_len:.1f})')
-    
     ax2.set_title("Segment Length Probability Density Graph", fontsize=12, fontweight='bold')
     ax2.set_xlabel("Segment Length (Number of Pixels Plotted)", fontsize=10)
     ax2.set_ylabel("Probability Density", fontsize=10)
     ax2.grid(True, linestyle=':', alpha=0.6)
     ax2.legend()
-    
-    plt.show()
 else:
-    print("\n[Warning] No segments were drawn. Adjust your threshold parameters.")
-    plt.ioff()
-    plt.show()
+    print("\n[Warning] No segments broke past your length criteria threshold configuration.")
+
+plt.show()
