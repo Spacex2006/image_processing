@@ -1,4 +1,5 @@
 import time
+import sys
 from pathlib import Path
 from PIL import Image
 import numpy as np
@@ -7,6 +8,33 @@ import tkinter as tk
 from tkinter import filedialog
 import queue
 from scipy.stats import gaussian_kde
+
+def print_progress_bar(iteration, total, prefix='', suffix='', decimals=1, length=30, fill='█', start_time=None):
+    """
+    Renders a terminal progress bar with dynamic ETA/ETC calculation.
+    """
+    percent = f"{100 * (iteration / float(total)):.{decimals}f}"
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    
+    eta_str = "--:--"
+    if start_time and iteration > 0:
+        elapsed = time.time() - start_time
+        rate = iteration / elapsed
+        remaining_sec = (total - iteration) / rate
+        
+        mins, secs = divmod(int(remaining_sec), 60)
+        hrs, mins = divmod(mins, 60)
+        
+        if hrs > 0:
+            eta_str = f"{hrs:02d}:{mins:02d}:{secs:02d}"
+        else:
+            eta_str = f"{mins:02d}:{secs:02d}"
+
+    sys.stdout.write(f'\r{prefix} |{bar}| {percent}% {suffix} [ETC: {eta_str}]')
+    sys.stdout.flush()
+    if iteration == total:
+        sys.stdout.write('\n')
 
 def get_file_path():
     root = tk.Tk()
@@ -27,6 +55,10 @@ def get_file_path():
     return Path(selected_path) if selected_path else None
 
 image_path = get_file_path()
+
+if not image_path:
+    print("[Error] No file selected. Exiting.")
+    exit()
 
 print("\n--- Image Processing Initialization ---")
 scale_factor = int(input("Enter downsampling ratio (e.g., 1 for full resolution, 8 for fast preview): "))
@@ -53,20 +85,19 @@ plt.axis('off')
 
 height, width, channels = sandbox_array.shape
 
-arr = np.zeros((height, width, 3), dtype=int)
-
-# Pass 1: Load RGB Data
-for row in range(height):
-    for col in range(width):
-        arr[row, col] = sandbox_array[row, col].astype(int)
+arr = sandbox_array[:, :, :3].astype(int)
 
 # 2. TIMING: RGB Vector Engine
 t1 = time.time()
-print("Running RGB Vector Engine... ", end="", flush=True)
+print("\nRunning RGB Vector Engine...")
 
 kms = np.zeros((height, width, 2))
 magn = np.zeros((height, width))
 magnitude = []
+
+total_pixels = height * width
+pixel_count = 0
+vec_start_time = time.time()
 
 for row in range(height):
     for col in range(width):
@@ -111,14 +142,21 @@ for row in range(height):
         
         magn[row, col] = total_mag
         magnitude.append((total_mag, row, col))
+        
+        pixel_count += 1
+        # Update progress bar every 1000 pixels or at completion to prevent stdout lag
+        if pixel_count % 1000 == 0 or pixel_count == total_pixels:
+            print_progress_bar(pixel_count, total_pixels, prefix='Vector Calculations:', suffix='Complete', length=30, start_time=vec_start_time)
 
 time_vector_engine = time.time() - t1
-print(f"Done ({time_vector_engine:.2f}s)")
+print(f"Vector Engine Finished in {time_vector_engine:.2f}s")
 
 # 3. TIMING: Sorting
 t2 = time.time()
+print("Sorting seed candidates by magnitude... ", end="", flush=True)
 magnitude.sort(key=lambda item: item[0], reverse=True)
 time_sort = time.time() - t2
+print(f"Done ({time_sort:.3f}s)")
 
 # --- TRACKING SETUP ---
 flat_magnitudes = magn.flatten()
@@ -130,53 +168,59 @@ a = np.percentile(flat_magnitudes, 99)
 b = np.percentile(flat_magnitudes, 75)
 active_threshold = a
 low_threshold = b
-print(f"Global Average Magnitude: {global_mean_magnitude:.2f}")
+
+print(f"\nGlobal Average Magnitude: {global_mean_magnitude:.2f}")
 print(f"Dynamic Cutoff Threshold Set To: {active_threshold:.2f}")
-z=magnitude[0]
-maxi=z[0]
+maxi = magnitude[0][0]
 
 # Create a Pitch-black canvas of the exact same size
 edge_canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
-print("Starting Line Crawl Exploration...")
 print("\n=== Launching Line Crawl Exploration ===")
-print(f"TARGET GLOBAL THRESHOLD: {active_threshold:.2f}\n")
-idk= np.zeros((height, width), dtype=bool)
+
+idk = np.zeros((height, width), dtype=bool)
 visited = np.zeros((height, width), dtype=bool)
 temp = np.zeros((height, width), dtype=bool)
 red = [255, 255, 255]
 
 segment_lengths = []
 
+# Estimate eligible seed count for the line crawl progress bar
+eligible_seeds_count = sum(1 for mag, _, _ in magnitude if mag >= active_threshold)
+
 # 4. TIMING: The Crawl
 t3 = time.time()
-x=0
-y=0
-for seed_mag, r_seed, c_seed in magnitude:
+x = 0
+y = 0
+crawl_start_time = time.time()
+
+for seed_idx, (seed_mag, r_seed, c_seed) in enumerate(magnitude):
     if seed_mag < active_threshold:
-        print(f"--> Halting global search: Next suggestion magnitude ({seed_mag:.2f}) drops below Target Threshold ({active_threshold:.2f})")
+        # Fill progress bar to 100% on early termination
+        print_progress_bar(eligible_seeds_count, eligible_seeds_count, prefix='Line Crawling:      ', suffix='Complete', length=30, start_time=crawl_start_time)
+        print(f"\n--> Halting global search: Magnitude ({seed_mag:.2f}) dropped below Target Threshold ({active_threshold:.2f})")
         break
         
     if visited[r_seed, c_seed]:
+        print_progress_bar(min(seed_idx + 1, eligible_seeds_count), eligible_seeds_count, prefix='Line Crawling:      ', suffix='Complete', length=30, start_time=crawl_start_time)
         continue
         
-    y+=1
-    print(f"\n[NEW SEED FOUND] Position: ({r_seed}, {c_seed}) | Seed Magnitude: {seed_mag:.2f} (active Target: {active_threshold:.2f}) (low Target: {low_threshold:.2f}")
-    print("Tracing path... ", end="", flush=True)
+    y += 1
     
     q = queue.Queue()
     forbidden = queue.Queue()
     q.put((r_seed, c_seed))
     pixels_traced_in_segment = 0
+    
     while not q.empty():
-        x+=1
+        x += 1
         r, c = q.get()
         
-        if idk[r, c] or temp[r,c]:
+        if idk[r, c] or temp[r, c]:
             continue
             
-        temp[r,c] = True
-        forbidden.put((r,c))
+        temp[r, c] = True
+        forbidden.put((r, c))
         pixels_traced_in_segment += 1
         
         curr_v = kms[r, c]
@@ -203,31 +247,33 @@ for seed_mag, r_seed, c_seed in magnitude:
         mag1 = magn[n1_r, n1_c] if (0 <= n1_r < height and 0 <= n1_c < width) else -1
         mag2 = magn[n2_r, n2_c] if (0 <= n2_r < height and 0 <= n2_c < width) else -1
         
-        if mag1 >= low_threshold and 0 <= n1_r < height and 0 <= n1_c < width and not temp[n1_r, n1_c] and not idk[n1_r,n1_c]:
+        if mag1 >= low_threshold and 0 <= n1_r < height and 0 <= n1_c < width and not temp[n1_r, n1_c] and not idk[n1_r, n1_c]:
             q.put((n1_r, n1_c))
-        if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not temp[n2_r, n2_c] and not idk[n2_r,n2_c]:
+        if mag2 >= low_threshold and 0 <= n2_r < height and 0 <= n2_c < width and not temp[n2_r, n2_c] and not idk[n2_r, n2_c]:
             q.put((n2_r, n2_c))
             
     if pixels_traced_in_segment > 100:
         while not forbidden.empty():
-            r,c = forbidden.get()
-            for repel_r in range(-5,6):
-                for repel_c in range(-5,6):
+            r, c = forbidden.get()
+            for repel_r in range(-5, 6):
+                for repel_c in range(-5, 6):
                     n_r, n_c = r + repel_r, c + repel_c
                     if 0 <= n_r < height and 0 <= n_c < width:
                         visited[n_r, n_c] = True
-                        if repel_r==0 and repel_c==0:
-                            idk[n_r,n_c]=True
-                            sandbox_array[r, c] = np.array(red)*((magn[r,c]/maxi)**0.5)
-                            edge_canvas[r, c] = np.array(red)*((magn[r,c]/maxi)**0.5)
-                
-    print(f"Done. Drew a segment of {pixels_traced_in_segment} connected pixels.")
-    if pixels_traced_in_segment > 100:
+                        if repel_r == 0 and repel_c == 0:
+                            idk[n_r, n_c] = True
+                            sandbox_array[r, c] = np.array(red) * ((magn[r, c] / maxi) ** 0.5)
+                            edge_canvas[r, c] = np.array(red) * ((magn[r, c] / maxi) ** 0.5)
+                            
         segment_lengths.append(pixels_traced_in_segment)
 
     im.set_data(sandbox_array)
     plt.draw()
     plt.pause(0.001)
+    
+    # Update progress bar per processed seed
+    print_progress_bar(min(seed_idx + 1, eligible_seeds_count), eligible_seeds_count, prefix='Line Crawling:      ', suffix='Complete', length=30, start_time=crawl_start_time)
+
 # =====================================================================
 # INJECTED MODULE: VECTOR GRADIENT MAGNITUDE ANALYSIS
 # =====================================================================
@@ -236,7 +282,6 @@ mag_mean = np.mean(flat_magnitudes)
 mag_std = np.std(flat_magnitudes)
 mag_max = np.max(flat_magnitudes)
 
-# Compute basic percentile markers to evaluate detail distribution
 p50 = np.percentile(flat_magnitudes, 50)
 p90 = np.percentile(flat_magnitudes, 90)
 p99 = np.percentile(flat_magnitudes, 99)
@@ -256,7 +301,7 @@ print("="*40 + "\n")
 time_crawl = time.time() - t3
 total_time = time.time() - total_start_time
 
-print("\n" + "="*40)
+print("="*40)
 print("     PERFORMANCE DIAGNOSTICS")
 print("="*40)
 print(f"Image Load & Resize : {time_load:.3f} seconds")
@@ -279,13 +324,11 @@ ax_edges.imshow(edge_canvas)
 ax_edges.axis('off')
 ax_edges.set_title("Result 2: Pure Edge Map")
 
-# --- WINDOW 3: INJECTED GRADIENT MAGNITUDE PLOT ENGINE ---
+# --- WINDOW 3: GRADIENT MAGNITUDE PLOT ---
 fig_mag, ax_mag = plt.subplots(figsize=(8, 5))
 ax_mag.hist(flat_magnitudes, bins=50, density=True, alpha=0.6, color='royalblue', edgecolor='black', label='Pixel Energies')
 
-# Generate continuous curve for gradient transitions
 if mag_std > 0:
-    # Sampling subset to speed up KDE calculation over large matrices
     sample_size = min(20000, len(flat_magnitudes))
     sampled_mags = np.random.choice(flat_magnitudes, sample_size, replace=False)
     kde_mag = gaussian_kde(sampled_mags)
@@ -301,7 +344,7 @@ ax_mag.set_ylabel("Probability Density", fontsize=10)
 ax_mag.grid(True, linestyle=':', alpha=0.6)
 ax_mag.legend()
 
-# --- WINDOW 4: PATH SEGMENT LENGTH PLOT ENGINE ---
+# --- WINDOW 4: PATH SEGMENT LENGTH PLOT ---
 if len(segment_lengths) > 0:
     lengths_arr = np.array(segment_lengths)
     avg_len = np.mean(lengths_arr)
@@ -312,8 +355,8 @@ if len(segment_lengths) > 0:
     print("\n" + "="*40)
     print("        SEGMENT LENGTH PROFILE")
     print("="*40)
-    print(f"Total New Seeds    : {y}")
-    print(f"Total Segments Evaluated : {x}")
+    print(f"Total New Seeds                 : {y}")
+    print(f"Total Segments Evaluated        : {x}")
     print(f"Total Unique Segments Generated : {total_segments}")
     print(f"Average Segment Length          : {avg_len:.2f} pixels")
     print(f"Standard Deviation (σ)          : {std_len:.2f} pixels")

@@ -1,0 +1,45 @@
+.aider*
+# ==========================================
+# Generated Reports & PDFs
+# ==========================================
+*.pdf
+project_summary.html
+
+# ==========================================
+# Generated Image Assets & Figures
+# ==========================================
+# Ignore generated output images, plots, and PDF page previews
+gradient_magnitude_map.png
+gradient_magnitude_map.jpg
+Dedicated_*.jpg
+Synchronized_*.jpg
+Grid_*.jpg
+Figure_*.png
+pdf_page_*.png
+input_file_*.png
+
+# If all generated test images are stored in an output folder, ignore the folder:
+# output/
+# test_images/
+
+# ==========================================
+# Python Caches & Bytecode
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ==========================================
+# Virtual Environments & IDE Configs
+# ==========================================
+venv/
+.venv/
+env/
+.vscode/
+.idea/
+
+# ==========================================
+# OS Junk
+# ==========================================
+.DS_Store
+Thumbs.db
